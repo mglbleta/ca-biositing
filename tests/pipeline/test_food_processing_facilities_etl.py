@@ -446,15 +446,16 @@ class TestFoodProcessingFacilitiesTransform:
         """When GEOCODE_TARGET=geocoder_test_set and the test set is empty, return empty DataFrame."""
         from ca_biositing.pipeline.etl.transform.infrastructure import food_processing_facilities
 
-        # Default GEOCODE_TARGET is "geocoder_test_set"; empty geo df → empty result
-        result = food_processing_facilities.transform.fn(
-            data_sources={
-                "all_facilities": _make_raw_df_real_world(),
-                "geocoder_test_set": pd.DataFrame(),
-            },
-            etl_run_id=1,
-            lineage_group_id=1,
-        )
+        # Explicitly patch GEOCODE_TARGET so this test is robust against env var overrides.
+        with self._patch_geocode_target("geocoder_test_set"):
+            result = food_processing_facilities.transform.fn(
+                data_sources={
+                    "all_facilities": _make_raw_df_real_world(),
+                    "geocoder_test_set": pd.DataFrame(),
+                },
+                etl_run_id=1,
+                lineage_group_id=1,
+            )
 
         # Returns empty DataFrame (not None) — empty geo set is a valid no-op
         assert result is not None
@@ -472,7 +473,9 @@ class TestFoodProcessingFacilitiesTransform:
             columns=["Address", "City", "Zip", "County"],
         )
 
-        with patch("sqlmodel.Session") as mock_session_cls, \
+        # Explicitly patch GEOCODE_TARGET so this test is robust against env var overrides.
+        with self._patch_geocode_target("geocoder_test_set"), \
+             patch("sqlmodel.Session") as mock_session_cls, \
              patch("ca_biositing.pipeline.utils.engine.get_engine"), \
              patch.dict(os.environ, {}, clear=True):  # no API key → geocoding skipped
             mock_session = MagicMock()

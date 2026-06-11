@@ -13,6 +13,8 @@ the UPSERT uses the same conflict key (name, address, city, zip) as the normal
 load step.
 """
 
+import os
+
 from prefect import flow, get_run_logger
 
 try:
@@ -119,6 +121,31 @@ def food_processing_facilities_flow():
         else 0
     )
     logger.info(f"[etl] {missing_latlong} rows still missing lat/long after geocoding step")
+
+    # ------------------------------------------------------------------
+    # Step 2.5: Save checkpoint CSV (geocoded data, before load)
+    # ------------------------------------------------------------------
+    # Save the geocoded DataFrame to a checkpoint CSV immediately after
+    # transform succeeds.  If the load step fails, the checkpoint can be
+    # replayed without re-calling the geocoder API (which costs money).
+    # Replay command (run inside the prefect-worker container):
+    #   python -c "
+    #   import pandas as pd, logging
+    #   from ca_biositing.pipeline.etl.load.food_processing_facilities import _upsert_records
+    #   df = pd.read_csv('/tmp/food_processing_checkpoint.csv', dtype=str)
+    #   _upsert_records(df, logging.getLogger('replay'))
+    #   "
+    checkpoint_path = os.environ.get(
+        "CHECKPOINT_CSV_PATH",
+        "/tmp/food_processing_checkpoint.csv",
+    )
+    try:
+        cleaned_data.to_csv(checkpoint_path, index=False)
+        logger.info(
+            f"[checkpoint] Saved {sheet_row_count} geocoded rows to {checkpoint_path}"
+        )
+    except Exception as exc:
+        logger.warning(f"[checkpoint] Could not save checkpoint CSV: {exc} — continuing")
 
     # ------------------------------------------------------------------
     # Step 3: Load transformed rows

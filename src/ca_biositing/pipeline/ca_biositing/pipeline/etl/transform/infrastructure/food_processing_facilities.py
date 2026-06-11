@@ -49,16 +49,20 @@ from ca_biositing.pipeline.utils.geo_utils import parse_addresses
 
 EXTRACT_SOURCES: List[str] = ["all_facilities", "geocoder_test_set"]
 
-# Safety cap: maximum number of addresses sent to the geocoding API in one run.
-# Prevents accidental mass-geocoding. Raise or remove this limit deliberately
-# once you have verified the geocoder works correctly on the test set.
-GEOCODE_ROW_LIMIT = 7000
+# Batch size for geocoding API calls.  The geocoder processes rows in chunks of
+# this size so a single run can handle the full ~6,000-row sheet without hitting
+# a hard circuit-breaker limit.  Raise this value deliberately if you want
+# larger batches; lower it to reduce API cost per run.
+GEOCODE_ROW_LIMIT: int = 500
 
 # ── GEOCODE_TARGET ────────────────────────────────────────────────────────────
-# Controls which sheet is geocoded and loaded. Edit this line to switch modes
+# Controls which sheet is geocoded and loaded. Edit this line to switch modes:
 #
 #   "geocoder_test_set"  → geocode ~12 test rows, load only those rows (SAFE DEFAULT)
-#   "all_facilities"     → geocode the full sheet, load all rows (run after verifying test set)
+#   "all_facilities"     → geocode the full sheet, load all rows
+#
+# To switch: change the string below and rebuild the Docker image (or restart
+# the local Prefect worker so the updated module is imported).
 # ─────────────────────────────────────────────────────────────────────────────
 GEOCODE_TARGET: str = "all_facilities"
 
@@ -315,12 +319,6 @@ def _apply_geocoding(
         f"{len(to_geocode)} rows queued for geocoding."
     )
 
-    if len(to_geocode) > GEOCODE_ROW_LIMIT:
-        raise RuntimeError(
-            f"Safety limit reached: {len(to_geocode)} rows queued for geocoding "
-            f"(cap {GEOCODE_ROW_LIMIT}). Reduce the batch or raise GEOCODE_ROW_LIMIT."
-        )
-
     if not os.getenv("GOOGLE_MAPS_API_KEY"):
         logger.info("GOOGLE_MAPS_API_KEY not set; skipping geocoding.")
         return geocode_df
@@ -329,36 +327,62 @@ def _apply_geocoding(
         logger.info("No new rows to geocode (all already in DB).")
         return geocode_df
 
-    address_df, _ = parse_addresses(
-        to_geocode,
-        address_column="address",
-        lat="latitude",
-        long="longitude",
+    # Geocode in batches of GEOCODE_ROW_LIMIT rows so the full sheet can be
+    # processed in a single run without a hard circuit-breaker limit.
+    total_queued = len(to_geocode)
+    n_batches = (total_queued + GEOCODE_ROW_LIMIT - 1) // GEOCODE_ROW_LIMIT
+    logger.info(
+        f"Geocoding {total_queued} rows in {n_batches} batch(es) "
+        f"of up to {GEOCODE_ROW_LIMIT} rows each."
     )
 
-    to_geocode = pd.concat(
-        [to_geocode.reset_index(drop=True), address_df.reset_index(drop=True)],
-        axis=1,
-    )
-    to_geocode["latitude"] = to_geocode["closest_latitude"]
-    to_geocode["longitude"] = to_geocode["closest_longitude"]
+    lat_map: dict = {}
+    lon_map: dict = {}
+    status_map: dict = {}
 
-    # Set geocode_status based on whether geocoding succeeded or failed
-    to_geocode["geocode_status"] = to_geocode["latitude"].apply(
-        lambda lat: "success" if lat is not None and not (isinstance(lat, float) and np.isnan(lat)) else "failed"
-    )
+    for batch_idx in range(n_batches):
+        batch_start = batch_idx * GEOCODE_ROW_LIMIT
+        batch_end = min(batch_start + GEOCODE_ROW_LIMIT, total_queued)
+        batch = to_geocode.iloc[batch_start:batch_end].copy()
+        logger.info(
+            f"  Batch {batch_idx + 1}/{n_batches}: rows {batch_start}–{batch_end - 1} "
+            f"({len(batch)} addresses)"
+        )
+
+        address_df, _ = parse_addresses(
+            batch,
+            address_column="address",
+            lat="latitude",
+            long="longitude",
+        )
+
+        batch = pd.concat(
+            [batch.reset_index(drop=True), address_df.reset_index(drop=True)],
+            axis=1,
+        )
+        batch["latitude"] = batch["closest_latitude"]
+        batch["longitude"] = batch["closest_longitude"]
+
+        # Set geocode_status based on whether geocoding succeeded or failed
+        batch["geocode_status"] = batch["latitude"].apply(
+            lambda lat: "success"
+            if lat is not None and not (isinstance(lat, float) and np.isnan(lat))
+            else "failed"
+        )
+
+        lat_map.update(batch.set_index("address_key")["latitude"].to_dict())
+        lon_map.update(batch.set_index("address_key")["longitude"].to_dict())
+        status_map.update(batch.set_index("address_key")["geocode_status"].to_dict())
 
     # Write geocoded lat/lon and geocode_status back into geocode_df by address_key
-    lat_map = to_geocode.set_index("address_key")["latitude"].to_dict()
-    lon_map = to_geocode.set_index("address_key")["longitude"].to_dict()
-    status_map = to_geocode.set_index("address_key")["geocode_status"].to_dict()
-
-    geocode_df["latitude"] = geocode_df["latitude"].fillna(
-        geocode_df["address_key"].map(lat_map)
-    )
-    geocode_df["longitude"] = geocode_df["longitude"].fillna(
-        geocode_df["address_key"].map(lon_map)
-    )
+    # Write geocoded lat/lon back: only fill rows where latitude is currently null.
+    # Use np.where to avoid pandas FutureWarning about fillna/combine_first
+    # downcasting object dtype arrays (pandas >= 2.1).
+    lat_fill = geocode_df["address_key"].map(lat_map)
+    lon_fill = geocode_df["address_key"].map(lon_map)
+    null_lat = geocode_df["latitude"].isna()
+    geocode_df["latitude"] = np.where(null_lat, lat_fill, geocode_df["latitude"])
+    geocode_df["longitude"] = np.where(null_lat, lon_fill, geocode_df["longitude"])
     # Only update geocode_status for rows that were actually attempted (in to_geocode)
     attempted_mask = geocode_df["address_key"].isin(status_map)
     geocode_df.loc[attempted_mask, "geocode_status"] = geocode_df.loc[attempted_mask, "address_key"].map(status_map)

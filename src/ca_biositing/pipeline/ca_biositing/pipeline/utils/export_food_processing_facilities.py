@@ -100,7 +100,7 @@ def export_food_processing_facilities(
     if engine is None:
         engine = get_engine()
 
-    print(f"🔌 Connecting to database…")
+    print("Connecting to database...")
 
     # Build a SELECT that only requests columns we know exist in the model.
     # Using explicit column list guards against schema drift.
@@ -108,7 +108,7 @@ def export_food_processing_facilities(
     query = text(f'SELECT {col_list} FROM "{TABLE_NAME}" ORDER BY processing_facility_id')
 
     with engine.connect() as conn:
-        print(f"📊 Querying {TABLE_NAME}…")
+        print(f"Querying {TABLE_NAME}...")
         result = conn.execute(query)
         rows = result.fetchall()
         columns = list(result.keys())
@@ -125,7 +125,7 @@ def export_food_processing_facilities(
 
     df.to_csv(output_path, index=False)
 
-    print(f"✅ Exported {len(df):,} rows → {output_path}")
+    print(f"Exported {len(df):,} rows -> {output_path}")
     return output_path
 
 
@@ -137,14 +137,14 @@ if __name__ == "__main__":
     # Allow an optional positional argument to override the output path.
     out = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_OUTPUT_PATH
 
-    print(f"📁 Output path : {out}")
-    print(f"🕐 Started at  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Output path : {out}")
+    print(f"Started at  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print()
 
     try:
         result_path = export_food_processing_facilities(output_path=out)
         print()
-        print(f"🎉 Done! Seed file written to:")
+        print("Done! Seed file written to:")
         print(f"   {result_path}")
     except Exception as exc:
         print(f"\n❌ Export failed: {exc}", file=sys.stderr)

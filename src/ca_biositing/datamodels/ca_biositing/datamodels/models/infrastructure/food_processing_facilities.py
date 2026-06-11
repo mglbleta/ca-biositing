@@ -1,6 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
-from sqlalchemy import Column, String, UniqueConstraint
+from sqlalchemy import Column, Index, String, func
 from sqlmodel import Field, SQLModel
 from typing import Optional
 
@@ -8,7 +8,19 @@ from typing import Optional
 class InfrastructureFoodProcessingFacilities(SQLModel, table=True):
     __tablename__ = "infrastructure_food_processing_facilities"
     __table_args__ = (
-        UniqueConstraint("name", "address", "city", "zip", name="uq_foodproc_name_addr_city_zip"),
+        # Functional unique index: COALESCE(zip, '') treats NULL zip as ''
+        # so facilities without a ZIP code are still deduplicated correctly.
+        # A standard UniqueConstraint would treat NULL != NULL (Postgres B-tree
+        # semantics), causing every ETL run to INSERT a new duplicate row for
+        # facilities that have no ZIP code.
+        Index(
+            "uq_foodproc_name_addr_city_zip_coalesce",
+            "name",
+            "address",
+            "city",
+            func.coalesce(Column("zip"), ""),
+            unique=True,
+        ),
     )
 
     created_at: Optional[datetime] = Field(default=None)

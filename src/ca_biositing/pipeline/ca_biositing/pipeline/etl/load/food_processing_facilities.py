@@ -74,8 +74,11 @@ def _upsert_records(df: pd.DataFrame, logger) -> int:
                     tbl.c["geocode_status"],
                 )
 
+                # Use the functional index name (not index_elements) because
+                # the conflict key is COALESCE(zip, '') — a functional expression
+                # that cannot be expressed as a plain column list in index_elements.
                 upsert_stmt = stmt.on_conflict_do_update(
-                    index_elements=["name", "address", "city", "zip"],
+                    constraint="uq_foodproc_name_addr_city_zip_coalesce",
                     set_=update_dict,
                 )
 
